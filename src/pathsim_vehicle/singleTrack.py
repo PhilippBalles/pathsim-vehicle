@@ -10,19 +10,20 @@
 
 import numpy as np
 
-from pathsim.blocks.ode import ODE
+from pathsim.blocks.dynsys import DynamicalSystem
 
 
 # BLOCK Definitions ================================================================================
 
-class SingleTrack(ODE):
+class SingleTrack(DynamicalSystem):
     """Nonlinear, force-driven single-track (bicycle) vehicle model.
 
     The four body-frame axle force resultants — longitudinal and lateral,
     front and rear — are supplied as *inputs*; the block integrates the
     full planar rigid-body equations of motion, appends the exact pose
     kinematics, and outputs the six-state vector
-    :math:`[v_x, v_y, r, \\psi, X, Y]`. Unlike :class:`LinearSingleTrack`,
+    :math:`[v_x, v_y, r, \\psi, X, Y]` together with the static axle loads
+    :math:`F_{z,f}, F_{z,r}`. Unlike :class:`LinearSingleTrack`,
     the longitudinal velocity :math:`v_x` is a *state* rather than an
     input, and there is no internal tire model, no steering input, and no
     small-angle assumption: the steering angle and the tire force law are
@@ -36,6 +37,24 @@ class SingleTrack(ODE):
     (ISO 8855: x forward, y left, z up), so a longitudinal force has no
     moment arm and the only yaw moment is :math:`l_f F_{y,f} - l_r F_{y,r}`;
     tire self-aligning moments are not represented.
+
+    The axle loads are published as *output ports* even though they are
+    static here (pure functions of mass and geometry): the chassis is the
+    block that owns :math:`m, g, l_f, l_r`, and routing :math:`F_z` over a
+    wire gives every rung of the chassis ladder the same plumbing — a
+    higher-fidelity chassis (dual track with load transfer) outputs dynamic
+    loads through identical ports, and the downstream ``Wheel`` never
+    changes. On a level road, the planar moment balance of the gravity
+    force about the rear and front contact points gives
+    (:math:`L = l_f + l_r`)
+
+    .. math::
+
+        F_{z,f} = \\frac{m\\,g\\,l_r}{L},
+        \\qquad
+        F_{z,r} = \\frac{m\\,g\\,l_f}{L},
+        \\qquad
+        F_{z,f} + F_{z,r} = m\\,g.
 
     This block integrates the planar rigid-body equations directly; there
     is no reduction or linearization, so the equations below *are* the
@@ -82,8 +101,11 @@ class SingleTrack(ODE):
         \\qquad
         \\dot Y = v_x\\sin\\psi + v_y\\cos\\psi.
 
-    The output is the full state
-    :math:`\\mathbf{y} = \\mathbf{x} = [v_x, v_y, r, \\psi, X, Y]^\\top`.
+    The output appends the static axle loads to the state,
+    :math:`\\mathbf{y} = [v_x, v_y, r, \\psi, X, Y, F_{z,f}, F_{z,r}]^\\top`,
+    and in particular does *not* depend on the input: the block has no
+    feedthrough, so feedback loops through this block still close through
+    the integrator and form no algebraic loop.
     All four input ports are mandatory and must be connected. There are no
     cornering-stiffness or :math:`v_{x,\\mathrm{eps}}` parameters: this
     block has neither a tire model nor a :math:`1/v_x` singularity, so its
@@ -116,6 +138,10 @@ class SingleTrack(ODE):
         vehicle position along the global X-axis [m]
     Y : float
         vehicle position along the global Y-axis [m]
+    F_z_f : float
+        static front-axle vertical load [N]
+    F_z_r : float
+        static rear-axle vertical load [N]
 
 
     Parameters
@@ -128,6 +154,8 @@ class SingleTrack(ODE):
         Distance from CG to front axle [m].
     l_r : float
         Distance from CG to rear axle [m].
+    g : float
+        Gravitational acceleration [m/s^2].
     initial_value : array_like, optional
         Initial state vector ``[v_x, v_y, r, psi, X, Y]``
 
@@ -136,23 +164,31 @@ class SingleTrack(ODE):
 
     # port labels for semantic access
     input_port_labels  = {"F_x_f": 0, "F_y_f": 1, "F_x_r": 2, "F_y_r": 3}
-    output_port_labels = {"v_x": 0, "v_y": 1, "r": 2, "psi": 3, "X": 4, "Y": 5}
+    output_port_labels = {"v_x": 0, "v_y": 1, "r": 2, "psi": 3, "X": 4, "Y": 5,
+                          "F_z_f": 6, "F_z_r": 7}
 
-    def __init__(self, m=1500.0, I_z=3000.0, l_f=1.2, l_r=1.4, initial_value=None):
+    def __init__(self, m=1500.0, I_z=3000.0, l_f=1.2, l_r=1.4, g=9.81,
+                 initial_value=None):
 
         # vehicle parameters
         self.m = m
         self.I_z = I_z
         self.l_f = l_f
         self.l_r = l_r
+        self.g = g
+
+        # static axle loads (moment balance about the contact points)
+        self.F_z_f = m * g * l_r / (l_f + l_r)
+        self.F_z_r = m * g * l_f / (l_f + l_r)
 
         if initial_value is None:
             initial_value = np.zeros(6)
 
         super().__init__(
-            func=self._func_dyn,
+            func_dyn=self._func_dyn,
+            func_alg=self._func_alg,
             initial_value=np.asarray(initial_value, dtype=float),
-            jac=self._jac_dyn,
+            jac_dyn=self._jac_dyn,
             )
 
 
@@ -187,6 +223,29 @@ class SingleTrack(ODE):
         dY   = v_x * np.sin(psi) + v_y * np.cos(psi)
 
         return np.array([dv_x, dv_y, dr, dpsi, dX, dY])
+
+
+    def _func_alg(self, x, u, t):
+        """Output equation: full state plus the precomputed static axle
+        loads. Independent of ``u`` — the base class's passthrough
+        detection therefore reports no feedthrough, preserving the
+        loop-free closure through the integrator.
+
+        Parameters
+        ----------
+        x : array[float]
+            State vector ``[v_x, v_y, r, psi, X, Y]``.
+        u : array[float]
+            Input vector (unused).
+        t : float
+            Time.
+
+        Returns
+        -------
+        y : array[float]
+            Output vector ``[v_x, v_y, r, psi, X, Y, F_z_f, F_z_r]``.
+        """
+        return np.concatenate([x, [self.F_z_f, self.F_z_r]])
 
 
     def _jac_dyn(self, x, u, t):

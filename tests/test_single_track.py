@@ -14,6 +14,23 @@ def test_state_is_six_dimensional():
     assert len(car.initial_value) == 6
 
 
+def test_static_axle_loads_and_output_equation():
+    """The output appends the static axle loads (moment balance about the
+    contact points) to the state and is independent of u (no feedthrough)."""
+    m, l_f, l_r, g = 1500.0, 1.2, 1.4, 9.81
+    car = SingleTrack(m=m, l_f=l_f, l_r=l_r, g=g)
+    L = l_f + l_r
+    assert np.isclose(car.F_z_f, m * g * l_r / L)
+    assert np.isclose(car.F_z_r, m * g * l_f / L)
+    assert np.isclose(car.F_z_f + car.F_z_r, m * g)
+
+    x = np.array([10.0, 0.5, 0.2, 0.3, 4.0, -2.0])
+    y0 = car._func_alg(x, np.zeros(4), 0.0)
+    y1 = car._func_alg(x, np.array([500.0, 800.0, -200.0, 600.0]), 0.0)
+    assert np.allclose(y0, np.concatenate([x, [car.F_z_f, car.F_z_r]]))
+    assert np.allclose(y0, y1)
+
+
 def test_rhs_matches_equations_of_motion():
     """The rhs is the Newton-Euler EOM plus exact pose kinematics."""
     car = SingleTrack(m=1500.0, I_z=3000.0, l_f=1.2, l_r=1.4)

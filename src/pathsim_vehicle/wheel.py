@@ -22,9 +22,10 @@ class Wheel(Block):
     """Per-corner bridge between the chassis and the contact patch.
 
     The block is *purely algebraic* (stateless, feedthrough): given the
-    steer angle :math:`\\delta`, the wheel spin speed :math:`\\omega`, and
-    the chassis velocity feedback :math:`(v_x, v_y, r)`, it forms the
-    contact-point velocities, the longitudinal slip ratio :math:`\\kappa`
+    steer angle :math:`\\delta`, the wheel spin speed :math:`\\omega`, the
+    chassis velocity feedback :math:`(v_x, v_y, r)`, and the vertical load
+    :math:`F_z`, it forms the contact-point velocities, the longitudinal
+    slip ratio :math:`\\kappa`
     and the slip angle :math:`\\alpha`, evaluates a swappable tire-force
     model, rotates the resulting tire-frame forces into the body frame,
     and outputs the two body-frame force components together with the
@@ -43,10 +44,13 @@ class Wheel(Block):
     returns the load torque :math:`M_y` that closes that balance. The tire
     force law lives in a stateless :class:`TireModel` that the ``Wheel``
     *calls* as an ordinary method — it is not a block and not part of the
-    connection graph. The vertical load :math:`F_z` is a static parameter
-    for now (a future suspension/load-transfer block will feed it through
-    a port); camber and the self-aligning moment :math:`M_z` are out of
-    scope in this version. Both frames follow ISO 8855 (x forward, y left,
+    connection graph. The vertical load :math:`F_z` is an *input port*,
+    fed by the chassis: :class:`SingleTrack` outputs its static axle
+    loads, and a higher-fidelity chassis (dual track with load transfer)
+    outputs dynamic loads through the same wire — every rung of the
+    chassis ladder presents identical plumbing to the ``Wheel``. Camber
+    and the self-aligning moment :math:`M_z` are out of scope in this
+    version. Both frames follow ISO 8855 (x forward, y left,
     z up); the tire frame is the body frame rotated by :math:`\\delta`
     about :math:`+z`, with the lateral axis :math:`y^{t}` the wheel spin
     axis.
@@ -98,19 +102,19 @@ class Wheel(Block):
         M_y     &= R_w\\,F_x^{t}.
         \\end{aligned}
 
-    All five input ports are mandatory and must be connected. The vertical
-    load :math:`F_z` is clamped to :math:`F_z \\ge 0` before the tire
-    call; promoting it to an input port when a suspension/load-transfer
-    block exists is a localized, additive change that does not touch the
-    tire models. No analytic Jacobian is supplied: the ``Operator``
-    differentiates the 3x5 feedthrough numerically, matching the lean
-    :class:`Function` reference (an analytic chain-rule Jacobian is a
-    documented, additive future upgrade). Parameters may be passed
-    directly or supplied by a ``Vehicle`` factory — the natural home for
-    the *derived* quantities, the signed lever arm :math:`l`
-    (:math:`+l_f`/:math:`-l_r`) and the static axle load
-    :math:`F_z = m g\\,l_r / (l_f + l_r)` (front) — which keeps the
-    ``Wheel`` agnostic to vehicle mass and geometry.
+    All six input ports are mandatory and must be connected. Beware the
+    one silent failure mode the :math:`F_z` port introduces: an
+    unconnected input reads 0.0 in PathSim, so a forgotten :math:`F_z`
+    wire means zero vertical load, zero tire forces, and a car that does
+    not move — without any error. Wire the chassis outputs
+    ``F_z_f``/``F_z_r`` to the wheels' ``F_z`` inputs. The load input is
+    clamped to :math:`F_z \\ge 0` before the tire call. No analytic
+    Jacobian is supplied: the ``Operator`` differentiates the 3x6
+    feedthrough numerically, matching the lean :class:`Function`
+    reference (an analytic chain-rule Jacobian is a documented, additive
+    future upgrade). The block stays agnostic to vehicle mass and
+    geometry: the load arrives over the wire, and the signed lever arm
+    :math:`l` (:math:`+l_f`/:math:`-l_r`) is passed at construction.
 
 
     Input Ports
@@ -125,6 +129,8 @@ class Wheel(Block):
         chassis lateral velocity [m/s]
     r : float
         chassis yaw rate [rad/s]
+    F_z : float
+        vertical load (from chassis) [N]
 
     Output Ports
     ------------
@@ -145,8 +151,6 @@ class Wheel(Block):
         Lateral contact-point offset [m]; 0 for single-track.
     R_w : float
         Effective rolling radius [m].
-    F_z : float
-        Static vertical load [N] (placeholder; set by the vehicle).
     v_eps : float
         Low-speed guard for the slip-ratio denominator [m/s].
     tire : TireModel, optional
@@ -156,17 +160,17 @@ class Wheel(Block):
     """
 
     # port labels for semantic access
-    input_port_labels  = {"delta": 0, "omega": 1, "v_x": 2, "v_y": 3, "r": 4}
+    input_port_labels  = {"delta": 0, "omega": 1, "v_x": 2, "v_y": 3,
+                          "r": 4, "F_z": 5}
     output_port_labels = {"F_x": 0, "F_y": 1, "M_y": 2}
 
-    def __init__(self, l=1.2, s=0.0, R_w=0.30, F_z=4000.0, v_eps=1.0, tire=None):
+    def __init__(self, l=1.2, s=0.0, R_w=0.30, v_eps=1.0, tire=None):
         super().__init__()
 
         # wheel parameters
         self.l = l
         self.s = s
         self.R_w = R_w
-        self.F_z = F_z
         self.v_eps = v_eps
 
         # tire force model (stateless, called in-process)
@@ -198,14 +202,14 @@ class Wheel(Block):
         Parameters
         ----------
         u : array[float]
-            Input vector ``[delta, omega, v_x, v_y, r]``.
+            Input vector ``[delta, omega, v_x, v_y, r, F_z]``.
 
         Returns
         -------
         y : array[float]
             Output vector ``[F_x, F_y, M_y]``.
         """
-        delta, omega, v_x, v_y, r = u
+        delta, omega, v_x, v_y, r, F_z = u
 
         # contact-point velocity (body frame); s = 0 for single track
         v_cx = v_x - self.s * r
@@ -215,8 +219,8 @@ class Wheel(Block):
         kappa = (self.R_w * omega - v_cx) / np.sqrt(v_cx**2 + self.v_eps**2)
         alpha = delta - np.arctan2(v_cy, v_cx)
 
-        # tire force law in the wheel frame (method call on the held model)
-        F_x_t, F_y_t = self.tire.forces(kappa, alpha, max(self.F_z, 0.0))
+        # tire force law in the wheel frame; load input clamped non-negative
+        F_x_t, F_y_t = self.tire.forces(kappa, alpha, max(F_z, 0.0))
 
         # rotate wheel-frame forces into the body frame by the steer angle
         F_x_b = F_x_t * np.cos(delta) - F_y_t * np.sin(delta)
