@@ -47,6 +47,10 @@ docs = [
     "sphinx-copybutton",
     "sphinx-design",
 ]
+derivations = [
+    # symbolic model derivations under derivations/ (Jacobians, linearizations)
+    "sympy>=1.12",
+]
 
 [project.urls]
 Homepage = "https://github.com/pathsim/pathsim-vehicle"
