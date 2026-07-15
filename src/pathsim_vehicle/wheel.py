@@ -38,10 +38,11 @@ class Wheel(Block):
     because :class:`SingleTrack` is an integrator, the feedback
     ``SingleTrack -> Wheel -> SingleTrack`` closes through the chassis
     state and forms *no algebraic loop*. The wheel spin speed
-    :math:`\\omega` is an *input*, not a state: a future driveline owns
-    the spin inertia and integrates
+    :math:`\\omega` is an *input*, not a state: the :class:`Driveline`
+    block owns the spin inertia and integrates
     :math:`I_w \\dot\\omega = T_d - T_b - M_y`, so the ``Wheel`` only
-    returns the load torque :math:`M_y` that closes that balance. The tire
+    returns the load torque :math:`M_y` that closes that balance (a
+    source block may still prescribe :math:`\\omega` directly). The tire
     force law lives in a stateless :class:`TireModel` that the ``Wheel``
     *calls* as an ordinary method — it is not a block and not part of the
     connection graph. The vertical load :math:`F_z` is an *input port*,
