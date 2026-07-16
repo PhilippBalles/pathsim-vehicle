@@ -18,11 +18,11 @@ from pathsim.optim.operator import Operator
 
 class Differential(Block):
     """Ideal open differential, including the final-drive ratio, coupling
-    one torque source to two :class:`Driveline` blocks.
+    one torque source to two :class:`Wheel` blocks.
 
     The block is the *coupling rung* of the driveline ladder and is
     *purely algebraic* (stateless, massless, lossless): the spin inertias
-    live in the two ``Driveline`` blocks it feeds, and any carrier or
+    live in the two ``Wheel`` blocks it feeds, and any carrier or
     pinion inertia is referred into their ``I_w`` (or neglected). The two
     output sides are labelled ``l``/``r`` (left/right on a dual-track
     axle); on the current single-track chassis, where wheels are lumped
@@ -52,7 +52,7 @@ class Differential(Block):
 
     An open differential is an *equal-torque* device: speed differences
     cost it nothing and torque differences are impossible. Behind two
-    identical ``Driveline`` blocks, the input torque appears only in the
+    identical ``Wheel`` blocks, the input torque appears only in the
     speed-*sum* dynamics; the speed-*difference* dynamics are driven
     purely by the load imbalance — on split friction the unloaded side
     spins up and no choice of :math:`T_{in}` can steer the difference.
@@ -60,22 +60,26 @@ class Differential(Block):
     block. Both derivations and the two-wheel effective-mass result
     :math:`\\dot v_x = i\\,T_{in}\\,R_w/(m R_w^2 + 2 I_w)` are verified
     symbolically and numerically in ``derive_differential.py``. Sign
-    conventions follow the ``Driveline``: all speeds positive rolling
+    conventions follow the ``Wheel``: all speeds positive rolling
     forward, positive :math:`T_{in}` drives the vehicle forward.
 
     The torque path and the speed path are decoupled: the torque outputs
     depend only on ``T_in``, the speed output only on the side speeds.
-    The block is feedthrough, but every loop through it
-    (``Differential -> Driveline -> Differential``) closes through the
-    ``Driveline`` integrators, so the graph stays free of algebraic
-    loops. Wiring caveats: unconnected ``omega_l``/``omega_r`` (they read
-    0.0) corrupt *only* the reported ``omega_in`` — harmless while
-    ``T_in`` comes from a :class:`Constant`, a silent failure the moment
-    an engine block computes its torque from ``omega_in``; wire both side
-    speeds whenever anything consumes ``omega_in``. Unconnected ``T_in``
-    is meaningful (coasting). Brake torques act on the wheel, not on the
-    input shaft: wire them to the ``Driveline`` ``T_b`` ports *behind*
-    the differential, one per side. Fidelity grows additively: a
+    Every loop through this block
+    (``Differential -> Wheel -> Differential``) closes through the
+    ``Wheel`` integrators — ``omega`` is a pure state output with no
+    instantaneous dependence on ``T_d``. PathSim's per-*block*
+    feedthrough detection cannot see that and conservatively flags the
+    cycle as an algebraic loop; the fixed-point stage it then runs
+    converges immediately, so the topology costs only the loop-solver
+    bookkeeping. Wiring caveats: unconnected ``omega_l``/``omega_r``
+    (they read 0.0) corrupt *only* the reported ``omega_in`` — harmless
+    while ``T_in`` comes from a :class:`Constant`, a silent failure the
+    moment an engine block computes its torque from ``omega_in``; wire
+    both side speeds whenever anything consumes ``omega_in``. Unconnected
+    ``T_in`` is meaningful (coasting). Brake torques act on the wheel,
+    not on the input shaft: wire them to the ``Wheel`` ``T_b`` ports
+    *behind* the differential, one per side. Fidelity grows additively: a
     limited-slip differential adds an antisymmetric coupling torque
     :math:`\\pm T_{LSD}(\\omega_l - \\omega_r)` (future block or
     extension); a *locked* differential is the stiff limit enforcing
@@ -88,9 +92,9 @@ class Differential(Block):
     T_in : float
         input-shaft torque (signed, from source) [N m]
     omega_l : float
-        left (front) side speed, from Driveline [rad/s]
+        left (front) side speed, from Wheel [rad/s]
     omega_r : float
-        right (rear) side speed, from Driveline [rad/s]
+        right (rear) side speed, from Wheel [rad/s]
 
     Output Ports
     ------------
@@ -123,6 +127,12 @@ class Differential(Block):
 
         # algebraic operator wrapping the input -> output map
         self.op_alg = Operator(func=self._func_alg)
+
+        # Pre-size the input register to the three declared ports. As part
+        # of the Wheel <-> Differential cycle this block is evaluated by
+        # PathSim's algebraic-loop stage before any connection has grown
+        # the register, and ``_func_alg`` unpacks all three inputs.
+        self.inputs.resize(len(self.input_port_labels))
 
 
     def update(self, t):

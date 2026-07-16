@@ -10,58 +10,54 @@
 
 import numpy as np
 
-from pathsim.blocks._block import Block
-from pathsim.optim.operator import Operator
+from pathsim.blocks.dynsys import DynamicalSystem
 
 from .tiremodels import LinearTire
 
 
 # BLOCK Definitions ================================================================================
 
-class Wheel(Block):
-    """Per-corner bridge between the chassis and the contact patch.
+class Wheel(DynamicalSystem):
+    """Per-corner spinning rigid body with a contact patch.
 
-    The block is *purely algebraic* (stateless, feedthrough): given the
-    steer angle :math:`\\delta`, the wheel spin speed :math:`\\omega`, the
-    chassis velocity feedback :math:`(v_x, v_y, r)`, and the vertical load
-    :math:`F_z`, it forms the contact-point velocities, the longitudinal
-    slip ratio :math:`\\kappa`
-    and the slip angle :math:`\\alpha`, evaluates a swappable tire-force
-    model, rotates the resulting tire-frame forces into the body frame,
-    and outputs the two body-frame force components together with the
-    spin-axis reaction torque :math:`M_y = R_w F_x^{t}`. It owns exactly
-    the two things the force-input :class:`SingleTrack` chassis
-    deliberately does not: the steering rotation and the tire force law.
+    The block is the physical wheel — rim, tire, hub, brake disc — as one
+    block. It owns the three things the force-input :class:`SingleTrack`
+    chassis deliberately does not: the steering rotation, the tire force
+    law, and the spin inertia. Its single state is the wheel spin speed
+    :math:`\\omega`, integrated from the Newton-Euler torque balance about
+    the spin axis (:math:`y^t`, ISO 8855; positive :math:`\\omega` rolls
+    the vehicle forward):
 
-    The two body-frame forces feed :class:`SingleTrack`'s force inputs
-    (one ``Wheel`` per axle, or one per corner in a dual-track model);
-    because :class:`SingleTrack` is an integrator, the feedback
-    ``SingleTrack -> Wheel -> SingleTrack`` closes through the chassis
-    state and forms *no algebraic loop*. The wheel spin speed
-    :math:`\\omega` is an *input*, not a state: the :class:`Driveline`
-    block owns the spin inertia and integrates
-    :math:`I_w \\dot\\omega = T_d - T_b - M_y`, so the ``Wheel`` only
-    returns the load torque :math:`M_y` that closes that balance (a
-    source block may still prescribe :math:`\\omega` directly). The tire
-    force law lives in a stateless :class:`TireModel` that the ``Wheel``
-    *calls* as an ordinary method — it is not a block and not part of the
-    connection graph. The vertical load :math:`F_z` is an *input port*,
-    fed by the chassis: :class:`SingleTrack` outputs its static axle
-    loads, and a higher-fidelity chassis (dual track with load transfer)
-    outputs dynamic loads through the same wire — every rung of the
-    chassis ladder presents identical plumbing to the ``Wheel``. Camber
-    and the self-aligning moment :math:`M_z` are out of scope in this
-    version. Both frames follow ISO 8855 (x forward, y left,
-    z up); the tire frame is the body frame rotated by :math:`\\delta`
-    about :math:`+z`, with the lateral axis :math:`y^{t}` the wheel spin
-    axis.
+    .. math::
 
-    The block evaluates the following chain on every update; there is no
-    integration, so the equations below *are* the block. The contact point
-    sits at body-frame position :math:`(l, s)` (:math:`l = +l_f` front,
-    :math:`-l_r` rear; :math:`s = 0` on the single-track centre line), and
-    its velocity follows from rigid-body kinematics with
-    :math:`\\boldsymbol{\\omega} = (0, 0, r)`:
+        I_w\\,\\dot\\omega = T_d - T_b - M_y,
+        \\qquad
+        M_y = R_w\\,F_x^{t},
+
+    with the spin inertia :math:`I_w` (rim, tire, hub, brake disc, and any
+    rigidly coupled rotating parts), the drive torque :math:`T_d` (from a
+    motor, engine, or differential), the brake torque :math:`T_b`, and the
+    road-reaction (load) torque :math:`M_y` computed internally from the
+    tire chain. Both torque inputs are *signed* and enter the balance
+    exactly as written — the block applies no sign logic of its own. In
+    particular a constant positive :math:`T_b` at standstill will spin the
+    wheel *backwards*: physically a brake opposes motion (Coulomb friction
+    with stiction), and that direction-opposing logic belongs to a future
+    brake block upstream of the ``T_b`` port, not to this block. Unlike
+    the chassis blocks, the right-hand side *does* depend on the own
+    state: :math:`M_y` grows with the slip ratio, which grows with
+    :math:`\\omega` — for a linear tire in straight driving
+    :math:`\\partial\\dot\\omega/\\partial\\omega =
+    -R_w^2 C_\\kappa/(I_w \\bar v) < 0`, a stable, milliseconds-fast spin
+    mode (verified in ``derive_wheel.py``), so an explicit solver needs
+    :math:`\\mathrm{d}t \\lesssim 10^{-3}\\,\\mathrm{s}` at the defaults.
+
+    Around that state sits the algebraic force chain, evaluated on every
+    update both for the outputs and for the :math:`M_y` inside the
+    balance. The contact point sits at body-frame position :math:`(l, s)`
+    (:math:`l = +l_f` front, :math:`-l_r` rear; :math:`s = 0` on the
+    single-track centre line), and its velocity follows from rigid-body
+    kinematics with :math:`\\boldsymbol{\\omega} = (0, 0, r)`:
 
     .. math::
 
@@ -70,8 +66,9 @@ class Wheel(Block):
         v_{cy} = v_y + l\\,r.
 
     The longitudinal slip ratio compares the circumferential speed
-    :math:`R_w \\omega` with :math:`v_{cx}`; the slip angle is the angle
-    between the wheel heading and the contact velocity:
+    :math:`R_w \\omega` (from the block's own state) with :math:`v_{cx}`;
+    the slip angle is the angle between the wheel heading and the contact
+    velocity:
 
     .. math::
 
@@ -92,38 +89,66 @@ class Wheel(Block):
 
         (F_x^{t},\\ F_y^{t}) = \\texttt{tire.forces}(\\kappa,\\ \\alpha,\\ F_z),
 
-    which are then rotated into the body frame by the steer angle and
-    reduced to the spin-axis reaction torque:
+    which are then rotated into the body frame by the steer angle:
 
     .. math::
 
         \\begin{aligned}
         F_x^{b} &= F_x^{t}\\cos\\delta - F_y^{t}\\sin\\delta, \\\\
-        F_y^{b} &= F_x^{t}\\sin\\delta + F_y^{t}\\cos\\delta, \\\\
-        M_y     &= R_w\\,F_x^{t}.
+        F_y^{b} &= F_x^{t}\\sin\\delta + F_y^{t}\\cos\\delta.
         \\end{aligned}
 
-    All six input ports are mandatory and must be connected. Beware the
-    one silent failure mode the :math:`F_z` port introduces: an
-    unconnected input reads 0.0 in PathSim, so a forgotten :math:`F_z`
-    wire means zero vertical load, zero tire forces, and a car that does
-    not move — without any error. Wire the chassis outputs
-    ``F_z_f``/``F_z_r`` to the wheels' ``F_z`` inputs. The load input is
-    clamped to :math:`F_z \\ge 0` before the tire call. No analytic
-    Jacobian is supplied: the ``Operator`` differentiates the 3x6
-    feedthrough numerically, matching the lean :class:`Function`
-    reference (an analytic chain-rule Jacobian is a documented, additive
-    future upgrade). The block stays agnostic to vehicle mass and
-    geometry: the load arrives over the wire, and the signed lever arm
-    :math:`l` (:math:`+l_f`/:math:`-l_r`) is passed at construction.
+    The two body-frame forces feed :class:`SingleTrack`'s force inputs
+    (one ``Wheel`` per axle, or one per corner in a dual-track model).
+    Both the chassis and the wheel are integrators, so with pure sources
+    on the torque ports the graph is free of algebraic loops. One caveat
+    when a *coupling block* such as the :class:`Differential` both feeds
+    ``T_d`` and reads ``omega`` back: PathSim's feedthrough detection is
+    per-*block*, not per-port, so this cycle is conservatively flagged as
+    an algebraic loop even though ``omega`` is a pure state output with no
+    instantaneous dependence on ``T_d`` — the fixed-point stage PathSim
+    then runs converges immediately. The tire force law lives in a
+    stateless :class:`TireModel` that the ``Wheel`` *calls* as an ordinary
+    method — it is not a block and not part of the connection graph. The
+    vertical load :math:`F_z` is an *input port*, fed by the chassis:
+    :class:`SingleTrack` outputs its static axle loads, and a
+    higher-fidelity chassis (dual track with load transfer) outputs
+    dynamic loads through the same wire — every rung of the chassis ladder
+    presents identical plumbing to the ``Wheel``. Camber and the
+    self-aligning moment :math:`M_z` are out of scope in this version.
+    Both frames follow ISO 8855 (x forward, y left, z up); the tire frame
+    is the body frame rotated by :math:`\\delta` about :math:`+z`, with
+    the lateral axis :math:`y^{t}` the wheel spin axis.
+
+    Wiring caveats: the chassis feedback :math:`(v_x, v_y, r)` and
+    :math:`F_z` are mandatory — an unconnected input reads 0.0 in PathSim,
+    so a forgotten :math:`F_z` wire means zero vertical load, zero tire
+    forces, and a car that does not move, without any error. The torque
+    ports are *meaningfully* optional: ``T_d`` unconnected is
+    freewheeling, ``T_b`` unconnected is no brake. For a rolling start at
+    chassis speed :math:`v_{x,0}` choose ``omega_0`` :math:`=
+    v_{x,0}/R_w`; the default 0 at nonzero chassis speed means a
+    locked-wheel transient (:math:`\\kappa \\approx -1`) until the stable
+    slip dynamics catch up. Rolling resistance and bearing drag are out of
+    scope; they can enter later as an upstream resistance-torque block on
+    the ``T_b`` path. The load input is clamped to :math:`F_z \\ge 0`
+    before the tire call. No analytic Jacobian is supplied: the state
+    Jacobian goes through the tire model, so the ``DynamicOperator``
+    differentiates numerically (an analytic chain-rule Jacobian is a
+    documented, additive future upgrade). The block stays agnostic to
+    vehicle mass and geometry: the load arrives over the wire, and the
+    signed lever arm :math:`l` (:math:`+l_f`/:math:`-l_r`) is passed at
+    construction.
 
 
     Input Ports
     -----------
     delta : float
         steer angle of this wheel [rad]
-    omega : float
-        wheel spin speed (from driveline) [rad/s]
+    T_d : float
+        drive torque (signed, from motor/engine/differential) [N m]
+    T_b : float
+        brake torque (signed, subtracted as-is) [N m]
     v_x : float
         chassis longitudinal velocity [m/s]
     v_y : float
@@ -139,8 +164,10 @@ class Wheel(Block):
         body-frame longitudinal force [N]
     F_y : float
         body-frame lateral force [N]
+    omega : float
+        wheel spin speed (= the state) [rad/s]
     M_y : float
-        spin-axis reaction torque R_w * F_x_t [N m]
+        spin-axis load torque R_w * F_x_t (observation) [N m]
 
 
     Parameters
@@ -152,8 +179,12 @@ class Wheel(Block):
         Lateral contact-point offset [m]; 0 for single-track.
     R_w : float
         Effective rolling radius [m].
+    I_w : float
+        Spin inertia about the wheel axis [kg m^2].
     v_eps : float
         Low-speed guard for the slip-ratio denominator [m/s].
+    omega_0 : float
+        Initial wheel spin speed [rad/s].
     tire : TireModel, optional
         Tire force model instance; defaults to ``LinearTire()``.
 
@@ -161,56 +192,53 @@ class Wheel(Block):
     """
 
     # port labels for semantic access
-    input_port_labels  = {"delta": 0, "omega": 1, "v_x": 2, "v_y": 3,
-                          "r": 4, "F_z": 5}
-    output_port_labels = {"F_x": 0, "F_y": 1, "M_y": 2}
+    input_port_labels  = {"delta": 0, "T_d": 1, "T_b": 2, "v_x": 3,
+                          "v_y": 4, "r": 5, "F_z": 6}
+    output_port_labels = {"F_x": 0, "F_y": 1, "omega": 2, "M_y": 3}
 
-    def __init__(self, l=1.2, s=0.0, R_w=0.30, v_eps=1.0, tire=None):
-        super().__init__()
+    def __init__(self, l=1.2, s=0.0, R_w=0.30, I_w=1.2, v_eps=1.0,
+                 omega_0=0.0, tire=None):
 
         # wheel parameters
         self.l = l
         self.s = s
         self.R_w = R_w
+        self.I_w = I_w
         self.v_eps = v_eps
 
         # tire force model (stateless, called in-process)
         self.tire = tire if tire is not None else LinearTire()
 
-        # algebraic operator wrapping the input -> output map
-        self.op_alg = Operator(func=self._func_alg)
+        super().__init__(
+            func_dyn=self._func_dyn,
+            func_alg=self._func_alg,
+            initial_value=np.asarray([omega_0], dtype=float),
+            )
+
+        # Pre-size the input register to the seven declared ports.
+        # DynamicalSystem probes ``func_alg`` for feedthrough in ``__len__``
+        # (during graph assembly, before any connection has grown the
+        # register), and both equations unpack all seven inputs.
+        self.inputs.resize(len(self.input_port_labels))
 
 
-    def update(self, t):
-        """Evaluate the wheel as part of the algebraic component of the
-        global system DAE.
-
-        Parameters
-        ----------
-        t : float
-            evaluation time
-        """
-
-        #apply operator to get output
-        y = self.op_alg(self.inputs.to_array())
-        self.outputs.update_from_array(y)
-
-
-    def _func_alg(self, u):
-        """Algebraic map from chassis/driveline inputs to body-frame
-        forces and spin-axis reaction torque.
+    def _tire_chain(self, omega, u):
+        """Shared slip/tire chain of both system equations: contact-point
+        kinematics -> slip pair -> tire call.
 
         Parameters
         ----------
+        omega : float
+            Wheel spin speed (the state).
         u : array[float]
-            Input vector ``[delta, omega, v_x, v_y, r, F_z]``.
+            Input vector ``[delta, T_d, T_b, v_x, v_y, r, F_z]``.
 
         Returns
         -------
-        y : array[float]
-            Output vector ``[F_x, F_y, M_y]``.
+        delta, T_d, T_b, F_x_t, F_y_t : float
+            Steer angle, the two torque inputs, and the tire-frame forces.
         """
-        delta, omega, v_x, v_y, r, F_z = u
+        delta, T_d, T_b, v_x, v_y, r, F_z = u
 
         # contact-point velocity (body frame); s = 0 for single track
         v_cx = v_x - self.s * r
@@ -223,11 +251,55 @@ class Wheel(Block):
         # tire force law in the wheel frame; load input clamped non-negative
         F_x_t, F_y_t = self.tire.forces(kappa, alpha, max(F_z, 0.0))
 
+        return delta, T_d, T_b, F_x_t, F_y_t
+
+
+    def _func_dyn(self, x, u, t):
+        """Torque balance about the spin axis.
+
+        Parameters
+        ----------
+        x : array[float]
+            State vector ``[omega]``.
+        u : array[float]
+            Input vector ``[delta, T_d, T_b, v_x, v_y, r, F_z]``.
+        t : float
+            Time.
+
+        Returns
+        -------
+        dxdt : array[float]
+            State derivative ``[domega/dt]``.
+        """
+        _, T_d, T_b, F_x_t, _ = self._tire_chain(x[0], u)
+
+        # spin-axis load torque closes the balance internally
+        return np.array([(T_d - T_b - self.R_w * F_x_t) / self.I_w])
+
+
+    def _func_alg(self, x, u, t):
+        """Output equation: body-frame forces, the spin speed, and the
+        spin-axis load torque (observation).
+
+        Parameters
+        ----------
+        x : array[float]
+            State vector ``[omega]``.
+        u : array[float]
+            Input vector ``[delta, T_d, T_b, v_x, v_y, r, F_z]``.
+        t : float
+            Time.
+
+        Returns
+        -------
+        y : array[float]
+            Output vector ``[F_x, F_y, omega, M_y]``.
+        """
+        omega = x[0]
+        delta, _, _, F_x_t, F_y_t = self._tire_chain(omega, u)
+
         # rotate wheel-frame forces into the body frame by the steer angle
         F_x_b = F_x_t * np.cos(delta) - F_y_t * np.sin(delta)
         F_y_b = F_x_t * np.sin(delta) + F_y_t * np.cos(delta)
 
-        # spin-axis reaction (load) torque for the driveline
-        M_y = self.R_w * F_x_t
-
-        return np.array([F_x_b, F_y_b, M_y])
+        return np.array([F_x_b, F_y_b, omega, self.R_w * F_x_t])
