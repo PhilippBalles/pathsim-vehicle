@@ -82,7 +82,7 @@ def _center_diff_car_sim(T_in, v_x0, duration, i=3.5):
         ]
 
     sim = Simulation([c_zero, c_Tin, diff, wf, wr, car, sc], conns,
-                     dt=0.001, log=False)
+                     dt=0.005, log=False)
     sim.run(duration)
     return sc.read(), wf.R_w
 
@@ -136,7 +136,7 @@ def test_open_diff_cannot_steer_the_speed_difference():
             Connection(wr["omega"], diff["omega_r"], sc[1]),
             ]
         sim = Simulation([c_Tin, c_Tbl, c_Tbr, c_vx, c_Fz, diff, wl, wr, sc],
-                         conns, dt=0.001, log=False)
+                         conns, dt=0.005, log=False)
         sim.run(2.0)
         t, data = sc.read()
         return data[0] - data[1]
