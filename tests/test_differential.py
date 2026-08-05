@@ -4,7 +4,7 @@ differential on the single-track car."""
 import numpy as np
 
 from pathsim import Simulation, Connection
-from pathsim.blocks import Constant, Scope
+from pathsim.blocks import Constant, Scope, Adder
 
 from pathsim_vehicle.differential import Differential
 from pathsim_vehicle.wheel import Wheel
@@ -47,7 +47,8 @@ def test_torque_and_speed_paths_are_decoupled():
 
 def _center_diff_car_sim(T_in, v_x0, duration, i=3.5):
     """Single-track car driven through a center differential: one torque
-    source feeds both axles' T_d ports, wheel speeds are reported back."""
+    source feeds both axles' net-torque ports, wheel speeds are reported
+    back."""
     car = SingleTrack(m=1500.0, I_z=3000.0, l_f=1.2, l_r=1.4,
                       initial_value=[v_x0, 0.0, 0.0, 0.0, 0.0, 0.0])
     omega_0 = v_x0 / 0.30
@@ -61,8 +62,8 @@ def _center_diff_car_sim(T_in, v_x0, duration, i=3.5):
         Connection(c_zero, wf["delta"], wr["delta"]),
         # torque source -> differential -> wheels ("l" = front, "r" = rear)
         Connection(c_Tin, diff["T_in"]),
-        Connection(diff["T_l"], wf["T_d"]),
-        Connection(diff["T_r"], wr["T_d"]),
+        Connection(diff["T_l"], wf["T"]),
+        Connection(diff["T_r"], wr["T"]),
         # wheel speeds back to the differential
         Connection(wf["omega"], diff["omega_l"]),
         Connection(wr["omega"], diff["omega_r"]),
@@ -123,20 +124,26 @@ def test_open_diff_cannot_steer_the_speed_difference():
         diff = Differential(i=3.5)
         c_Tin, c_Tbl, c_Tbr = Constant(T_in), Constant(50.0), Constant(10.0)
         c_vx, c_Fz = Constant(20.0), Constant(4000.0)
+        # net wheel torque = differential drive MINUS the brake magnitude;
+        # with a single torque port the two sources are summed by an Adder
+        add_l, add_r = Adder("+-"), Adder("+-")
         sc = Scope(labels=["omega_l", "omega_r"])
         conns = [
             Connection(c_Tin, diff["T_in"]),
-            Connection(diff["T_l"], wl["T_d"]),
-            Connection(diff["T_r"], wr["T_d"]),
-            Connection(c_Tbl, wl["T_b"]),
-            Connection(c_Tbr, wr["T_b"]),
+            Connection(diff["T_l"], add_l[0]),
+            Connection(c_Tbl, add_l[1]),
+            Connection(add_l, wl["T"]),
+            Connection(diff["T_r"], add_r[0]),
+            Connection(c_Tbr, add_r[1]),
+            Connection(add_r, wr["T"]),
             Connection(c_vx, wl["v_x"], wr["v_x"]),
             Connection(c_Fz, wl["F_z"], wr["F_z"]),
             Connection(wl["omega"], diff["omega_l"], sc[0]),
             Connection(wr["omega"], diff["omega_r"], sc[1]),
             ]
-        sim = Simulation([c_Tin, c_Tbl, c_Tbr, c_vx, c_Fz, diff, wl, wr, sc],
-                         conns, dt=0.005, log=False)
+        sim = Simulation(
+            [c_Tin, c_Tbl, c_Tbr, c_vx, c_Fz, add_l, add_r, diff, wl, wr, sc],
+            conns, dt=0.005, log=False)
         sim.run(2.0)
         t, data = sc.read()
         return data[0] - data[1]

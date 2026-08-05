@@ -26,16 +26,17 @@ def test_initial_state():
 
 
 def test_rhs_is_the_torque_balance():
-    """I_w*domega/dt = T_d - T_b - R_w*F_x_t with the force from the PATCH
+    """I_w*domega/dt = T - R_w*F_x_t with the force from the PATCH
     state: an unloaded patch transmits nothing regardless of the spin
-    speed; a loaded patch opposes the spin."""
+    speed; a loaded patch opposes the spin. ``T`` is the net spin-axis
+    torque (drive minus brake, summed externally)."""
     wheel = Wheel(I_w=1.2)
-    v_x, T_d, T_b = 20.0, 300.0, 50.0
-    u = np.array([0.0, T_d, T_b, v_x, 0.0, 0.0, 4000.0])
+    v_x, T = 20.0, 250.0                       # net torque (e.g. 300 drive - 50 brake)
+    u = np.array([0.0, T, v_x, 0.0, 0.0, 4000.0])
 
     # unloaded patch (u_x = 0): net torque alone accelerates the wheel
     domega = wheel._func_dyn(np.array([v_x / wheel.R_w, 0.0, 0.0]), u, 0.0)[0]
-    assert np.isclose(domega, (T_d - T_b) / wheel.I_w)
+    assert np.isclose(domega, T / wheel.I_w)
 
     # loaded patch: F_x_t = C_kappa * u_x / sigma_x opposes the spin
     u_x = 0.003
@@ -43,7 +44,7 @@ def test_rhs_is_the_torque_balance():
     domega_loaded = wheel._func_dyn(
         np.array([v_x / wheel.R_w, u_x, 0.0]), u, 0.0)[0]
     assert np.isclose(domega_loaded,
-                      (T_d - T_b - wheel.R_w * F_x_t) / wheel.I_w)
+                      (T - wheel.R_w * F_x_t) / wheel.I_w)
 
 
 def test_patch_relaxes_toward_the_steady_slips():
@@ -51,7 +52,7 @@ def test_patch_relaxes_toward_the_steady_slips():
     rigid steady-state slips and is stationary exactly there."""
     wheel = Wheel()
     delta, omega, v_x = 0.05, 40.0, 15.0
-    u = np.array([delta, 0.0, 0.0, v_x, 0.0, 0.0, 4000.0])
+    u = np.array([delta, 0.0, v_x, 0.0, 0.0, 4000.0])
 
     v_bar = np.sqrt(v_x**2 + wheel.v_eps**2)
     kappa_ss = (wheel.R_w * omega - v_x) / v_bar
@@ -77,7 +78,7 @@ def test_low_speed_damping_ramp():
     x = np.array([10.0, 0.0, 0.0])          # spinning wheel, empty patch
 
     # at standstill: F = tire(0) + d_low_ramped * du_x, tire term is zero
-    u_still = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4000.0])
+    u_still = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 4000.0])
     F_x = wheel._func_alg(x, u_still, 0.0)[0]
     v_bar = wheel.v_eps
     du_x = wheel.R_w * x[0]                  # v_bar*kappa_ss at v_cx = 0
@@ -85,7 +86,7 @@ def test_low_speed_damping_ramp():
     assert np.isclose(F_x, d * du_x)
 
     # at speed: damping fully ramped out, empty patch transmits nothing
-    u_fast = np.array([0.0, 0.0, 0.0, 20.0, 0.0, 0.0, 4000.0])
+    u_fast = np.array([0.0, 0.0, 20.0, 0.0, 0.0, 4000.0])
     assert np.isclose(wheel._func_alg(x, u_fast, 0.0)[0], 0.0)
 
 
@@ -96,7 +97,7 @@ def test_pure_rolling_gives_zero_forces():
     v_x = 20.0
     omega = v_x / wheel.R_w
     y = wheel._func_alg(np.array([omega, 0.0, 0.0]),
-                        np.array([0.0, 0.0, 0.0, v_x, 0.0, 0.0, 4000.0]), 0.0)
+                        np.array([0.0, 0.0, v_x, 0.0, 0.0, 4000.0]), 0.0)
     assert np.allclose([y[0], y[1], y[3]], 0.0)
     assert np.isclose(y[2], omega)
 
@@ -105,8 +106,8 @@ def test_standstill_is_well_defined():
     """All states and inputs zero -> zero slip targets (atan2(0,0) = 0),
     zero patch motion, zero forces, no NaN."""
     wheel = Wheel()
-    assert np.allclose(wheel._func_alg(np.zeros(3), np.zeros(7), 0.0), 0.0)
-    assert np.allclose(wheel._func_dyn(np.zeros(3), np.zeros(7), 0.0), 0.0)
+    assert np.allclose(wheel._func_alg(np.zeros(3), np.zeros(6), 0.0), 0.0)
+    assert np.allclose(wheel._func_dyn(np.zeros(3), np.zeros(6), 0.0), 0.0)
 
 
 def test_algebraic_chain_matches_equations():
@@ -117,7 +118,7 @@ def test_algebraic_chain_matches_equations():
     u_x, u_y = 0.004, -0.01
     F_x, F_y, omega_out, M_y = wheel._func_alg(
         np.array([omega, u_x, u_y]),
-        np.array([delta, 0.0, 0.0, v_x, v_y, r, F_z]), 0.0)
+        np.array([delta, 0.0, v_x, v_y, r, F_z]), 0.0)
 
     F_x_t, F_y_t = wheel.tire.forces(u_x / wheel.sigma_x,
                                      u_y / wheel.sigma_y, F_z)
@@ -134,7 +135,7 @@ def test_negative_load_input_is_clamped():
     loaded patch."""
     wheel = Wheel(tire=SimplePacejka())
     y = wheel._func_alg(np.array([0.0, 0.05, 0.1]),
-                        np.array([0.0, 0.0, 0.0, 20.0, 0.0, 0.0, -4000.0]),
+                        np.array([0.0, 0.0, 20.0, 0.0, 0.0, -4000.0]),
                         0.0)
     assert np.allclose(y, 0.0)
 
@@ -149,7 +150,7 @@ def test_braking_slip_gives_negative_force_and_torque():
     kappa_ss = (wheel.R_w * omega - v_x) / np.sqrt(v_x**2 + wheel.v_eps**2)
     F_x, F_y, _, M_y = wheel._func_alg(
         np.array([omega, wheel.sigma_x * kappa_ss, 0.0]),
-        np.array([0.0, 0.0, 0.0, v_x, 0.0, 0.0, 4000.0]), 0.0)
+        np.array([0.0, 0.0, v_x, 0.0, 0.0, 4000.0]), 0.0)
     assert F_x < 0.0
     assert np.isclose(F_y, 0.0)
     assert M_y < 0.0
@@ -164,7 +165,7 @@ def test_tire_model_is_swappable_and_pacejka_saturates():
     pacejka = Wheel(tire=SimplePacejka())
     kappa_ss = -v_x / np.sqrt(v_x**2 + linear.v_eps**2)
     x = np.array([0.0, linear.sigma_x * kappa_ss, 0.0])
-    u = np.array([0.0, 0.0, 0.0, v_x, 0.0, 0.0, F_z])
+    u = np.array([0.0, 0.0, v_x, 0.0, 0.0, F_z])
 
     F_x_lin = linear._func_alg(x, u, 0.0)[0]
     F_x_pac = pacejka._func_alg(x, u, 0.0)[0]
@@ -173,23 +174,23 @@ def test_tire_model_is_swappable_and_pacejka_saturates():
     assert abs(F_x_lin) > 10 * abs(F_x_pac)
 
 
-def _torque_driven_car_sim(T_d, T_b, v_x0, duration, omega_scale=1.0):
+def _torque_driven_car_sim(T, v_x0, duration, omega_scale=1.0):
     """Straight-driving torque-driven car: SingleTrack + one Wheel per axle
-    (LinearTire). ``T_d``/``T_b`` are applied to both wheels; ``omega_scale``
-    scales the rolling-start spin speed."""
+    (LinearTire). The net spin-axis torque ``T`` (signed; positive drives,
+    negative brakes) is applied to both wheels; ``omega_scale`` scales the
+    rolling-start spin speed."""
     car = SingleTrack(m=1500.0, I_z=3000.0, l_f=1.2, l_r=1.4,
                       initial_value=[v_x0, 0.0, 0.0, 0.0, 0.0, 0.0])
     omega_0 = omega_scale * v_x0 / 0.30
     wf = Wheel(l=1.2, omega_0=omega_0)
     wr = Wheel(l=-1.4, omega_0=omega_0)
-    c_zero, c_Td, c_Tb = Constant(0.0), Constant(T_d), Constant(T_b)
+    c_zero, c_T = Constant(0.0), Constant(T)
     sc = Scope(labels=["v_x", "omega_f", "omega_r"])
 
     conns = [
         Connection(c_zero, wf["delta"], wr["delta"]),
-        # torque sources into the wheels
-        Connection(c_Td, wf["T_d"], wr["T_d"]),
-        Connection(c_Tb, wf["T_b"], wr["T_b"]),
+        # net torque source into both wheels
+        Connection(c_T, wf["T"], wr["T"]),
         # chassis velocity feedback and static axle loads to both wheels
         Connection(car["v_x"], wf["v_x"], wr["v_x"], sc[0]),
         Connection(car["v_y"], wf["v_y"], wr["v_y"]),
@@ -206,7 +207,7 @@ def _torque_driven_car_sim(T_d, T_b, v_x0, duration, omega_scale=1.0):
         Connection(wr["omega"], sc[2]),
         ]
 
-    sim = Simulation([c_zero, c_Td, c_Tb, wf, wr, car, sc], conns,
+    sim = Simulation([c_zero, c_T, wf, wr, car, sc], conns,
                      dt=0.005, log=False)
     sim.run(duration)
     return sc.read(), wf.R_w
@@ -215,7 +216,7 @@ def _torque_driven_car_sim(T_d, T_b, v_x0, duration, omega_scale=1.0):
 def test_closed_loop_free_rolling_settles():
     """Zero torque: the (damped) patch-spin dynamics find pure rolling on
     their own, even from a 20% overspin start."""
-    (t, data), R_w = _torque_driven_car_sim(T_d=0.0, T_b=0.0, v_x0=20.0,
+    (t, data), R_w = _torque_driven_car_sim(T=0.0, v_x0=20.0,
                                             duration=2.0, omega_scale=1.2)
     v_x, omega_f, omega_r = data[0], data[1], data[2]
     assert np.isclose(R_w * omega_f[-1], v_x[-1], atol=1e-6)
@@ -224,14 +225,14 @@ def test_closed_loop_free_rolling_settles():
 
 def test_closed_loop_accelerates_at_effective_mass_rate():
     """Constant drive torque on both axles: quasi-steady acceleration
-    dv_x/dt = 2*T_d/R_w / (m + 2*I_w/R_w^2) (verified in derive_wheel.py;
+    dv_x/dt = 2*T/R_w / (m + 2*I_w/R_w^2) (verified in derive_wheel.py;
     the quasi-steady approximation is good to ~1e-4)."""
-    T_d = 300.0
-    (t, data), R_w = _torque_driven_car_sim(T_d=T_d, T_b=0.0, v_x0=20.0,
+    T = 300.0
+    (t, data), R_w = _torque_driven_car_sim(T=T, v_x0=20.0,
                                             duration=4.0)
     v_x = data[0]
     m, I_w = 1500.0, 1.2
-    a_pred = (2 * T_d / R_w) / (m + 2 * I_w / R_w**2)
+    a_pred = (2 * T / R_w) / (m + 2 * I_w / R_w**2)
 
     mid = len(t) // 2
     a_meas = (v_x[-1] - v_x[mid]) / (t[-1] - t[mid])
@@ -239,13 +240,15 @@ def test_closed_loop_accelerates_at_effective_mass_rate():
 
 
 def test_closed_loop_brake_torque_decelerates():
-    """The same magnitude on the T_b ports decelerates at the same rate."""
-    T_b = 300.0
-    (t, data), R_w = _torque_driven_car_sim(T_d=0.0, T_b=T_b, v_x0=20.0,
+    """The same magnitude as a NEGATIVE net torque (pure braking)
+    decelerates at the same rate: with one signed torque port, a brake is
+    just T < 0."""
+    T = -300.0
+    (t, data), R_w = _torque_driven_car_sim(T=T, v_x0=20.0,
                                             duration=4.0)
     v_x = data[0]
     m, I_w = 1500.0, 1.2
-    a_pred = -(2 * T_b / R_w) / (m + 2 * I_w / R_w**2)
+    a_pred = (2 * T / R_w) / (m + 2 * I_w / R_w**2)
 
     mid = len(t) // 2
     a_meas = (v_x[-1] - v_x[mid]) / (t[-1] - t[mid])
@@ -253,17 +256,59 @@ def test_closed_loop_brake_torque_decelerates():
     assert np.isclose(a_meas, a_pred, rtol=1e-3)
 
 
+def test_drive_and_brake_sum_through_an_adder():
+    """The intended idiom for the single torque port: a drive source and a
+    brake source are combined by an ``Adder("+-")`` into the net ``T``.
+    A car fed drive=500, brake=200 through the Adder must move identically
+    to one driven by a single net T = 300 -- the port sees only the sum."""
+    # reference: a single net torque T = 300 on both axles
+    (_, d_ref), _ = _torque_driven_car_sim(T=300.0, v_x0=10.0, duration=2.0)
+
+    # idiom: drive (+500) and brake (-200) summed by an Adder into T
+    car = SingleTrack(m=1500.0, I_z=3000.0, l_f=1.2, l_r=1.4,
+                      initial_value=[10.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    omega_0 = 10.0 / 0.30
+    wf, wr = Wheel(l=1.2, omega_0=omega_0), Wheel(l=-1.4, omega_0=omega_0)
+    drive, brake, c_zero = Constant(500.0), Constant(200.0), Constant(0.0)
+    add = Adder("+-")
+    sc = Scope(labels=["v_x", "omega_f", "omega_r"])
+    conns = [
+        Connection(c_zero, wf["delta"], wr["delta"]),
+        Connection(drive, add[0]),
+        Connection(brake, add[1]),
+        Connection(add, wf["T"], wr["T"]),
+        Connection(car["v_x"], wf["v_x"], wr["v_x"], sc[0]),
+        Connection(car["v_y"], wf["v_y"], wr["v_y"]),
+        Connection(car["r"], wf["r"], wr["r"]),
+        Connection(car["F_z_f"], wf["F_z"]),
+        Connection(car["F_z_r"], wr["F_z"]),
+        Connection(wf["F_x"], car["F_x_f"]),
+        Connection(wf["F_y"], car["F_y_f"]),
+        Connection(wr["F_x"], car["F_x_r"]),
+        Connection(wr["F_y"], car["F_y_r"]),
+        Connection(wf["omega"], sc[1]),
+        Connection(wr["omega"], sc[2]),
+        ]
+    sim = Simulation([c_zero, drive, brake, add, wf, wr, car, sc], conns,
+                     dt=0.005, log=False)
+    sim.run(2.0)
+    _, d_add = sc.read()
+
+    # drive - brake = 500 - 200 = 300 = the reference net torque
+    assert np.allclose(d_ref[0], d_add[0], atol=1e-9)
+
+
 def test_closed_loop_standstill_launch_at_the_recommended_step():
     """The payoff of the relaxation states: a standstill launch (the
     stiffest regime of the rigid-slip wheel, eigenvalue ~ -7600 1/s) runs
     stably and accurately at dt = 0.005 and reaches the effective-mass
     speed."""
-    T_d, duration = 300.0, 4.0
-    (t, data), R_w = _torque_driven_car_sim(T_d=T_d, T_b=0.0, v_x0=0.0,
+    T, duration = 300.0, 4.0
+    (t, data), R_w = _torque_driven_car_sim(T=T, v_x0=0.0,
                                             duration=duration)
     v_x = data[0]
     m, I_w = 1500.0, 1.2
-    a_pred = (2 * T_d / R_w) / (m + 2 * I_w / R_w**2)
+    a_pred = (2 * T / R_w) / (m + 2 * I_w / R_w**2)
 
     assert np.isfinite(v_x).all()
     # the launch transient is over quickly; the mean acceleration over the
@@ -297,7 +342,7 @@ def _cruise_cornering_sim(delta, v_ref, duration, tire=None):
         Connection(c_ref, err[0]),
         Connection(car["v_x"], err[1], wf["v_x"], wr["v_x"]),
         Connection(err, pid),
-        Connection(pid, wf["T_d"], wr["T_d"]),
+        Connection(pid, wf["T"], wr["T"]),
         # chassis velocity feedback and static axle loads to both wheels
         Connection(car["v_y"], wf["v_y"], wr["v_y"]),
         Connection(car["r"], wf["r"], wr["r"]),

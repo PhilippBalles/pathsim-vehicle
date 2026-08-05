@@ -87,18 +87,21 @@ class Wheel(DynamicalSystem):
 
     .. math::
 
-        I_w\\,\\dot\\omega = T_d - T_b - M_y,
+        I_w\\,\\dot\\omega = T - M_y,
         \\qquad
         M_y = R_w\\,F_x^{t},
 
-    with the drive torque :math:`T_d` (from a motor, engine, or
-    differential) and the brake torque :math:`T_b`. Both torque inputs
-    are *signed* and enter exactly as written — the block applies no sign
-    logic of its own. In particular a constant positive :math:`T_b` at
-    standstill will spin the wheel *backwards*: physically a brake
-    opposes motion (Coulomb friction with stiction), and that
+    with the net spin-axis torque :math:`T` — the signed sum of every
+    drive and brake source acting on the wheel (motor, engine,
+    differential, brake). It enters exactly as written; the block applies
+    no sign logic of its own. A constant positive :math:`T` at standstill
+    spins the wheel *forwards*, a negative one *backwards*: physically a
+    brake opposes motion (Coulomb friction with stiction), and that
     direction-opposing logic belongs to a future brake block upstream of
-    the ``T_b`` port. The tire-frame forces are rotated into the body
+    this port. Because the port carries one net torque, drive and brake
+    (or any several sources) are summed with an ``Adder`` before it — the
+    same visible injection pattern the chassis force ports use. The
+    tire-frame forces are rotated into the body
     frame by the steer angle, :math:`F_x^b = F_x^t\\cos\\delta -
     F_y^t\\sin\\delta`, :math:`F_y^b = F_x^t\\sin\\delta +
     F_y^t\\cos\\delta`.
@@ -137,8 +140,8 @@ class Wheel(DynamicalSystem):
     :math:`F_z` are mandatory — an unconnected input reads 0.0 in
     PathSim, so a forgotten :math:`F_z` wire means zero vertical load,
     zero tire forces, and a car that does not move, without any error.
-    The torque ports are *meaningfully* optional: ``T_d`` unconnected is
-    freewheeling, ``T_b`` unconnected is no brake. For a rolling start at
+    The torque port is *meaningfully* optional: ``T`` unconnected reads
+    0.0 — no drive and no brake, i.e. a coasting wheel. For a rolling start at
     chassis speed :math:`v_{x,0}` choose ``omega_0`` :math:`=
     v_{x,0}/R_w`; the patch deflections start at zero, which is exact for
     pure rolling. Using the guarded :math:`\\bar v` in the patch decay
@@ -147,7 +150,7 @@ class Wheel(DynamicalSystem):
     :math:`\\sigma_x/v_\\varepsilon` (~0.3 s) instead of holding forever
     — true standstill stiction belongs to a future brake block. Rolling
     resistance and bearing drag are out of scope; they can enter later as
-    an upstream resistance-torque block on the ``T_b`` path. The load
+    an upstream resistance-torque source summed into ``T``. The load
     input is clamped to :math:`F_z \\ge 0` before the tire call. No
     analytic Jacobian is supplied: the state Jacobian goes through the
     tire model, so the ``DynamicOperator`` differentiates numerically (an
@@ -155,7 +158,7 @@ class Wheel(DynamicalSystem):
     upgrade). The block stays agnostic to vehicle mass and geometry: the
     load arrives over the wire, and the signed lever arm :math:`l` is
     passed at construction. When a coupling block such as the
-    :class:`Differential` both feeds ``T_d`` and reads ``omega`` back,
+    :class:`Differential` both feeds ``T`` and reads ``omega`` back,
     PathSim's per-*block* feedthrough detection conservatively flags the
     cycle as an algebraic loop even though ``omega`` is a pure state
     output; the fixed-point stage it then runs converges immediately.
@@ -165,10 +168,10 @@ class Wheel(DynamicalSystem):
     -----------
     delta : float
         steer angle of this wheel [rad]
-    T_d : float
-        drive torque (signed, from motor/engine/differential) [N m]
-    T_b : float
-        brake torque (signed, subtracted as-is) [N m]
+    T : float
+        net spin-axis torque (signed; drive minus brake, summed
+        externally with an ``Adder`` when there is more than one
+        source) [N m]
     v_x : float
         chassis longitudinal velocity [m/s]
     v_y : float
@@ -223,8 +226,8 @@ class Wheel(DynamicalSystem):
     """
 
     # port labels for semantic access
-    input_port_labels  = {"delta": 0, "T_d": 1, "T_b": 2, "v_x": 3,
-                          "v_y": 4, "r": 5, "F_z": 6}
+    input_port_labels  = {"delta": 0, "T": 1, "v_x": 2,
+                          "v_y": 3, "r": 4, "F_z": 5}
     output_port_labels = {"F_x": 0, "F_y": 1, "omega": 2, "M_y": 3}
 
     def __init__(self, l=1.2, s=0.0, R_w=0.30, I_w=1.2, sigma_x=0.30,
@@ -251,10 +254,10 @@ class Wheel(DynamicalSystem):
             initial_value=np.asarray([omega_0, 0.0, 0.0], dtype=float),
             )
 
-        # Pre-size the input register to the seven declared ports.
+        # Pre-size the input register to the six declared ports.
         # DynamicalSystem probes ``func_alg`` for feedthrough in ``__len__``
         # (during graph assembly, before any connection has grown the
-        # register), and both equations unpack all seven inputs.
+        # register), and both equations unpack all six inputs.
         self.inputs.resize(len(self.input_port_labels))
 
 
@@ -269,16 +272,16 @@ class Wheel(DynamicalSystem):
         x : array[float]
             State vector ``[omega, u_x, u_y]``.
         u : array[float]
-            Input vector ``[delta, T_d, T_b, v_x, v_y, r, F_z]``.
+            Input vector ``[delta, T, v_x, v_y, r, F_z]``.
 
         Returns
         -------
-        delta, T_d, T_b, F_x_t, F_y_t, du_x, du_y : float
-            Steer angle, the two torque inputs, the transmitted
+        delta, T, F_x_t, F_y_t, du_x, du_y : float
+            Steer angle, the net spin-axis torque, the transmitted
             tire-frame forces, and the patch derivatives.
         """
         omega, u_x, u_y = x
-        delta, T_d, T_b, v_x, v_y, r, F_z = u
+        delta, T, v_x, v_y, r, F_z = u
 
         # contact-point velocity (body frame); s = 0 for single track
         v_cx = v_x - self.s * r
@@ -305,7 +308,7 @@ class Wheel(DynamicalSystem):
             d = 0.0
         F_x_t = F_x_t0 + d * du_x
 
-        return delta, T_d, T_b, F_x_t, F_y_t, du_x, du_y
+        return delta, T, F_x_t, F_y_t, du_x, du_y
 
 
     def _func_dyn(self, x, u, t):
@@ -316,7 +319,7 @@ class Wheel(DynamicalSystem):
         x : array[float]
             State vector ``[omega, u_x, u_y]``.
         u : array[float]
-            Input vector ``[delta, T_d, T_b, v_x, v_y, r, F_z]``.
+            Input vector ``[delta, T, v_x, v_y, r, F_z]``.
         t : float
             Time.
 
@@ -325,10 +328,10 @@ class Wheel(DynamicalSystem):
         dxdt : array[float]
             State derivative ``[domega/dt, du_x/dt, du_y/dt]``.
         """
-        _, T_d, T_b, F_x_t, _, du_x, du_y = self._tire_chain(x, u)
+        _, T, F_x_t, _, du_x, du_y = self._tire_chain(x, u)
 
         # spin-axis load torque closes the balance internally
-        domega = (T_d - T_b - self.R_w * F_x_t) / self.I_w
+        domega = (T - self.R_w * F_x_t) / self.I_w
 
         return np.array([domega, du_x, du_y])
 
@@ -342,7 +345,7 @@ class Wheel(DynamicalSystem):
         x : array[float]
             State vector ``[omega, u_x, u_y]``.
         u : array[float]
-            Input vector ``[delta, T_d, T_b, v_x, v_y, r, F_z]``.
+            Input vector ``[delta, T, v_x, v_y, r, F_z]``.
         t : float
             Time.
 
@@ -351,7 +354,7 @@ class Wheel(DynamicalSystem):
         y : array[float]
             Output vector ``[F_x, F_y, omega, M_y]``.
         """
-        delta, _, _, F_x_t, F_y_t, _, _ = self._tire_chain(x, u)
+        delta, _, F_x_t, F_y_t, _, _ = self._tire_chain(x, u)
 
         # rotate wheel-frame forces into the body frame by the steer angle
         F_x_b = F_x_t * np.cos(delta) - F_y_t * np.sin(delta)

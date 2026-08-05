@@ -68,7 +68,7 @@ class Differential(Block):
     Every loop through this block
     (``Differential -> Wheel -> Differential``) closes through the
     ``Wheel`` integrators — ``omega`` is a pure state output with no
-    instantaneous dependence on ``T_d``. PathSim's per-*block*
+    instantaneous dependence on ``T``. PathSim's per-*block*
     feedthrough detection cannot see that and conservatively flags the
     cycle as an algebraic loop; the fixed-point stage it then runs
     converges immediately, so the topology costs only the loop-solver
@@ -78,8 +78,9 @@ class Differential(Block):
     moment an engine block computes its torque from ``omega_in``; wire
     both side speeds whenever anything consumes ``omega_in``. Unconnected
     ``T_in`` is meaningful (coasting). Brake torques act on the wheel,
-    not on the input shaft: wire them to the ``Wheel`` ``T_b`` ports
-    *behind* the differential, one per side. Fidelity grows additively: a
+    not on the input shaft: sum them into each ``Wheel``'s single ``T``
+    port with an ``Adder`` *behind* the differential, one per side (the
+    differential's drive-torque output plus the signed brake torque). Fidelity grows additively: a
     limited-slip differential adds an antisymmetric coupling torque
     :math:`\\pm T_{LSD}(\\omega_l - \\omega_r)` (future block or
     extension); a *locked* differential is the stiff limit enforcing
